@@ -153,8 +153,7 @@ BAD_SNR_THRESHOLD = 4.4
     [(*x, BAD_SNR_THRESHOLD) for x in starbgone.BAD_SOLVER_COMBINATIONS]
 )
 def test_end_to_end(xp, decomposer, solver, snr_threshold):
-    data_url = 'https://github.com/carlgogo/VIP_extras/raw/master/datasets/naco_betapic_preproc.npz'
-    data = np.load(BytesIO(urlopen(data_url).read()))
+    data = np.load('./naco_betapic_preproc_absil2013_gonzalez2017.npz')
     n_modes = 50
     threshold = 2200  # fake, just to test masking
     good_pix_mask = xp.asarray(np.average(data['cube'], axis=0) < threshold)

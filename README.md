@@ -11,3 +11,7 @@ You will need several Python packages and a CUDA-capable NVIDIA GPU to run the t
 Our implementation of the "SVD downdate" can be found in the `minimal_downdate()` function in `starbgone.py`. An example of an end-to-end calculation from data cube to SNR can be found in `calc_snr()` in `benchmark_snr.py`.
 
 Benchmarks were conducted on the University of Arizona HPC cluster _Ocelote_, and PBS batch scripts to reproduce `combined_out_benchmark_scaling.csv` and `out_benchmark_snr.csv` are available upon request.
+
+## Example data
+
+The [example data](https://github.com/carlgogo/VIP_extras/raw/master/datasets/naco_betapic_preproc.npz) of beta Pictoris b (`naco_betapic_preproc_absil2013_gonzalez2017.npz`) was initially published as [Absil et al. 2013](http://doi.org/10.1051/0004-6361/201322748) and made available as part of [https://github.com/carlgogo/VIP_extras](https://github.com/carlgogo/VIP_extras) ([Gonzalez et al. 2017](http://doi.org/10.3847/1538-3881/aa73d7)). It is stored in this repository to make the examples self-contained, but is not covered by the GPLv3 license. The original papers must be cited if it is reused.

@@ -47,8 +47,7 @@ def modes_vs_snr(cube, angles, k_modes_vals, decomposer, solver, verbose=False):
     return np.asarray(snrs)
 
 def main():
-    data_url = 'https://github.com/carlgogo/VIP_extras/raw/master/datasets/naco_betapic_preproc.npz'
-    data = np.load(BytesIO(urlopen(data_url).read()))
+    data = np.load('./naco_betapic_preproc_absil2013_gonzalez2017.npz')
     cube_host = data['cube'].astype('=f4')
     angles = data['angles']
     n_frames = cube_host.shape[0]
