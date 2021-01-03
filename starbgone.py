@@ -5,8 +5,31 @@ import numpy as np
 from scipy.sparse.linalg import aslinearoperator, svds
 from scipy.linalg import lapack
 import skimage.transform
-import torch
-import cupy as cp
+# GPU computing libs are wrapped in a try/except so that
+# this file is still importable when they're absent, but
+# that's not a recommended way to use this library!
+try:
+    import torch
+    HAVE_TORCH = True
+except ImportError:
+    warnings.warn('PyTorch is unavailable, attempts to use PyTorch solvers will error')
+    torch = None
+    HAVE_TORCH = False
+try:
+    import cupy as cp
+    HAVE_CUPY = True
+except ImportError:
+    warnings.warn('CuPy is unavailable, attempts to use GPU solvers will error')
+    class cupy():
+        @staticmethod
+        def get_array_module(array):
+            '''Stub for missing cupy.get_array_module that always
+            returns NumPy for CPU/GPU generic code that calls
+            this function'''
+            return np
+    cp = cupy
+    HAVE_CUPY = False
+
 
 def torch_svd(array, full_matrices=False, n_modes=None):
     '''Wrap `torch.svd` to handle conversion between NumPy/CuPy arrays
@@ -186,7 +209,7 @@ def cpu_top_k_cov_syevr(array, n_modes=None):
     return evals[lower_idx-1:upper_idx+1], evecs
 
 
-def minimal_downdate(mtx_u, diag_s, mtx_v, min_col_to_remove, max_col_to_remove, solver=torch_svd, compute_v=False):
+def minimal_downdate(mtx_u, diag_s, mtx_v, min_col_to_remove, max_col_to_remove, solver=generic_svd, compute_v=False):
     '''Modify an existing SVD `mtx_u @ diag(diag_s) @ mtx_v.T` to
     remove columns given by `col_idxs_to_remove`, returning
     a new diagonalization
@@ -360,12 +383,19 @@ def wrap_vector(image_vec, shape, x_indices, y_indices):
     return cube[0]
 
 
+def mean_subtract_vecs(image_vecs):
+    xp = cp.get_array_module(image_vecs)
+    mean_vec = xp.average(image_vecs, axis=1)
+    image_vecs_meansub = image_vecs - mean_vec[:,xp.newaxis]
+    return image_vecs_meansub, mean_vec
+
 class Decomposer:
     def __init__(self, image_vecs, n_modes, solver=None):
         self.image_vecs = image_vecs
+        self.meansub_image_vecs, self.mean_vec = mean_subtract_vecs(image_vecs)
         self.n_modes = n_modes
         self.xp = cp.get_array_module(image_vecs)
-        self.idxs = self.xp.arange(self.image_vecs.shape[1])
+        self.idxs = self.xp.arange(self.meansub_image_vecs.shape[1])
         self.solver = solver
     def eigenimages(self, min_excluded_idx, max_excluded_idx):
         raise NotImplementedError()
@@ -409,17 +439,19 @@ class SVDDecomposer(Decomposer):
         if self.solver is None:
             self.solver = generic_svd
     def eigenimages(self, min_excluded_idx, max_excluded_idx):
-        ref = drop_idx_range_cols(self.image_vecs, min_excluded_idx, max_excluded_idx)
+        ref = drop_idx_range_cols(self.meansub_image_vecs, min_excluded_idx, max_excluded_idx)
         u, s, v = self.solver(ref, n_modes=self.n_modes)
         return u[:,:self.n_modes]
 
-class DowndateSVDDecomposer(Decomposer):
-    def __init__(self, image_vecs, n_modes, solver=None, extra_modes=1):
+class MinimalDowndateSVDDecomposer(Decomposer):
+    def __init__(self, image_vecs, n_modes, solver=None, extra_modes=1, initial_solver=None):
         super().__init__(image_vecs, n_modes, solver=solver)
         if self.solver is None:
-            self.solver = torch_svd
+            self.solver = generic_svd
+        if initial_solver is None:
+            self.initial_solver = self.solver
         self.n_modes = n_modes
-        self.mtx_u, self.diag_s, self.mtx_v = self.solver(self.image_vecs, n_modes=n_modes+extra_modes)
+        self.mtx_u, self.diag_s, self.mtx_v = self.initial_solver(self.meansub_image_vecs, n_modes=n_modes+extra_modes)
         self.idxs = self.xp.arange(image_vecs.shape[1])
     def eigenimages(self, min_excluded_idx, max_excluded_idx):
         new_u, new_s, new_v = minimal_downdate(
@@ -436,9 +468,9 @@ class ReuseSVDDecomposer(Decomposer):
     def __init__(self, image_vecs, n_modes, solver=None):
         super().__init__(image_vecs, n_modes, solver=solver)
         if self.solver is None:
-            self.solver = torch_svd
+            self.solver = generic_svd
         self.n_modes = n_modes
-        self.mtx_u, self.diag_s, self.mtx_v = self.solver(self.image_vecs, n_modes=n_modes)
+        self.mtx_u, self.diag_s, self.mtx_v = self.solver(self.meansub_image_vecs, n_modes=n_modes)
     def eigenimages(self, min_excluded_idx, max_excluded_idx):
         return self.mtx_u[:,:self.n_modes]
 
@@ -450,7 +482,7 @@ class RandomizedSVDDecomposer(Decomposer):
             whiten=False,
             svd_solver='randomized'
         )
-        data_subset = np.delete(self.image_vecs, slice(min_excluded_idx, max_excluded_idx), axis=1)
+        data_subset = np.delete(self.meansub_image_vecs, slice(min_excluded_idx, max_excluded_idx), axis=1)
         model.fit(data_subset.T)
         return model.components_.T
 
@@ -479,16 +511,16 @@ def drop_idx_range_rows_cols(arr, min_excluded_idx, max_excluded_idx):
 class CovarianceDecomposition(Decomposer):
     def __init__(self, image_vecs, n_modes, solver=None):
         super().__init__(image_vecs, n_modes, solver=solver)
-        self.covariance = self.image_vecs.T @ self.image_vecs
+        self.covariance = self.meansub_image_vecs.T @ self.meansub_image_vecs
         if self.solver is None:
             self.solver = generic_eigh
     def eigenimages(self, min_excluded_idx, max_excluded_idx):
-        xp = cp.get_array_module(self.image_vecs)
+        xp = cp.get_array_module(self.meansub_image_vecs)
         temp_covar = drop_idx_range_rows_cols(self.covariance, min_excluded_idx, max_excluded_idx)
         evals, evecs = self.solver(temp_covar, n_modes=self.n_modes)
-        indices = xp.arange(self.image_vecs.shape[1])
+        indices = xp.arange(self.meansub_image_vecs.shape[1])
         mask = (indices < min_excluded_idx) | (indices >= max_excluded_idx)
-        reference = self.image_vecs[:,mask]
+        reference = self.meansub_image_vecs[:,mask]
         Z_KL = reference @ (evecs * np.power(evals, -1/2))
         # Truncate
         Z_KL_truncated = Z_KL[:,:self.n_modes]
@@ -496,13 +528,9 @@ class CovarianceDecomposition(Decomposer):
 
 def klip_frame(target, decomposer, exclude_idx_min, exclude_idx_max):
     eigenimages = decomposer.eigenimages(exclude_idx_min, exclude_idx_max)
-    return target - eigenimages @ (eigenimages.T @ target)
+    meansub_target = target - decomposer.mean_vec
+    return meansub_target - eigenimages @ (eigenimages.T @ meansub_target)
 
-def mean_subtract_vecs(image_vecs):
-    xp = cp.get_array_module(image_vecs)
-    mean_vec = xp.average(image_vecs, axis=1)
-    image_vecs_meansub = image_vecs - mean_vec[:,xp.newaxis]
-    return image_vecs_meansub
 
 def klip_to_modes(image_vecs, decomp_class, n_modes, solver=None, exclude_nearest=0):
     '''
@@ -644,22 +672,46 @@ def reduce_apertures(image, r_px, starting_pa_deg, resolution_element_px, operat
         results.append(operation(image[mask] / np.count_nonzero(mask & np.isfinite(image))))
     return locations, results
 
-SOLVER_COMBINATIONS = [
-    (np, DowndateSVDDecomposer, torch_svd),             # 0
-    (np, DowndateSVDDecomposer, generic_svd),           # 1
-    (np, SVDDecomposer, torch_svd),                     # 2
-    (np, SVDDecomposer, generic_svd),                   # 3
-    (np, SVDDecomposer, cpu_top_k_svd_arpack),          # 4
-    (np, RandomizedSVDDecomposer, None),                # 5
-    (np, CovarianceDecomposition, torch_symeig),        # 6
-    (np, CovarianceDecomposition, generic_eigh),        # 7
-    (np, CovarianceDecomposition, cpu_top_k_cov_syevr), # 8
-    (cp, DowndateSVDDecomposer, torch_svd),             # 9
-    (cp, DowndateSVDDecomposer, generic_svd),           # 10
-    (cp, SVDDecomposer, torch_svd),                     # 11
-    (cp, SVDDecomposer, generic_svd),                   # 12
-    (cp, CovarianceDecomposition, torch_symeig),        # 13
-    (cp, CovarianceDecomposition, generic_eigh),        # 14
-    (np, ReuseSVDDecomposer, torch_svd),                # 15
-    (cp, ReuseSVDDecomposer, torch_svd),                # 16
-]
+SOLVER_COMBINATIONS = ()
+
+GOOD_COMBOS_CPU = (
+    (np, MinimalDowndateSVDDecomposer, generic_svd),
+    (np, SVDDecomposer, generic_svd),
+    (np, SVDDecomposer, cpu_top_k_svd_arpack),
+    (np, RandomizedSVDDecomposer, None),
+    (np, CovarianceDecomposition, generic_eigh),
+    (np, CovarianceDecomposition, cpu_top_k_cov_syevr),
+)
+SOLVER_COMBINATIONS += GOOD_COMBOS_CPU
+
+GOOD_COMBOS_CPU_TORCH = (
+    (np, MinimalDowndateSVDDecomposer, torch_svd),
+    (np, SVDDecomposer, torch_svd),
+    (np, CovarianceDecomposition, torch_symeig),
+)
+SOLVER_COMBINATIONS += GOOD_COMBOS_CPU_TORCH
+
+GOOD_COMBOS_GPU = (
+    (cp, MinimalDowndateSVDDecomposer, generic_svd),
+    (cp, SVDDecomposer, generic_svd),
+    (cp, CovarianceDecomposition, generic_eigh),
+)
+SOLVER_COMBINATIONS += GOOD_COMBOS_GPU
+
+GOOD_COMBOS_GPU_TORCH = (
+    (cp, MinimalDowndateSVDDecomposer, torch_svd),
+    (cp, SVDDecomposer, torch_svd),
+    (cp, CovarianceDecomposition, torch_symeig),
+)
+SOLVER_COMBINATIONS += GOOD_COMBOS_GPU_TORCH
+
+BAD_SOLVER_COMBINATIONS = (
+    (np, ReuseSVDDecomposer, generic_svd),
+)
+SOLVER_COMBINATIONS += BAD_SOLVER_COMBINATIONS
+
+GOOD_SOLVER_COMBINATIONS = GOOD_COMBOS_CPU
+if HAVE_TORCH:
+    GOOD_SOLVER_COMBINATIONS += GOOD_COMBOS_CPU_TORCH
+    if HAVE_CUPY:
+        GOOD_SOLVER_COMBINATIONS += GOOD_COMBOS_GPU

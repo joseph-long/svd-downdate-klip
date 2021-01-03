@@ -15,9 +15,8 @@ def log_and_print(fh, msg):
 def calc_snr(cube, angles, decomposer, solver, k_modes):
     good_pix_mask = np.ones_like(cube[0], dtype=bool)
     image_vecs, xx, yy = starbgone.unwrap_cube(cube, good_pix_mask)
-    image_vecs_meansub = starbgone.mean_subtract_vecs(image_vecs)
     starlight_subtracted = starbgone.klip_to_modes(
-        image_vecs_meansub,
+        image_vecs,
         decomposer,
         k_modes,
         solver=solver
